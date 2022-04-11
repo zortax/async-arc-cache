@@ -21,6 +21,7 @@ pub enum CacheError {
 
 enum CacheCommand<K: Eq + Hash + 'static, V> {
   GetItem(K, Sender<CachedArc<K, V>>),
+  GetItemIfExists(K, Sender<Option<CachedArc<K, V>>>),
   DeleteItem(Arc<K>),
   Exit,
 }
@@ -89,11 +90,12 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
       let sender = sender.clone();
       async move {
         let mut data: HashMap<Arc<K>, CachedArc<K, V>> = HashMap::new();
+
         while let Some(command) = receiver.recv().await {
           match command {
             CacheCommand::GetItem(key, responder) => {
               let result = if let Some(value) = data.get(&key) {
-                value.clone()
+                (*value).clone()
               } else {
                 // SAFETY: safe, as we fully await the future this reference is
                 // moved to before moving/dropping the value it points to
@@ -110,6 +112,32 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
                 value
               };
               let _ignored = responder.send(result);
+            }
+            CacheCommand::GetItemIfExists(key, responder) => {
+              let _ignored = responder.send(if data.contains_key(&key) {
+                let result = if let Some(value) = data.get(&key) {
+                  (*value).clone()
+                } else {
+                  // SAFETY: safe, as we fully await the future this reference
+                  // is moved to before moving/dropping the
+                  // value it points to
+                  let key_ref: &'static K =
+                    unsafe { std::mem::transmute(&key) };
+                  let inner = constructor(key_ref).await;
+                  let key = Arc::new(key);
+                  let value = CachedArc {
+                    key: key.clone(),
+                    inner: Arc::new(inner),
+                    rc: Arc::new(AtomicUsize::new(1)),
+                    sender: sender.clone(),
+                  };
+                  let _ignored = data.insert(key, value.clone());
+                  value
+                };
+                Some(result)
+              } else {
+                None
+              });
             }
             CacheCommand::DeleteItem(key) => {
               let _ignored = data.remove(key.deref());
@@ -140,6 +168,21 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
     self
       .sender
       .send(CacheCommand::GetItem(key, responder))
+      .map_err(|_| CacheError::CacheClosed)?;
+    Ok(response.await?)
+  }
+
+  pub async fn get_if_exists(
+    &self,
+    key: K,
+  ) -> Result<Option<CachedArc<K, V>>, CacheError> {
+    if self.sender.is_closed() {
+      return Err(CacheError::CacheClosed);
+    }
+    let (responder, response) = channel();
+    self
+      .sender
+      .send(CacheCommand::GetItemIfExists(key, responder))
       .map_err(|_| CacheError::CacheClosed)?;
     Ok(response.await?)
   }
