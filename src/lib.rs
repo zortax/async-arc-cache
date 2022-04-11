@@ -95,6 +95,8 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
               let result = if let Some(value) = data.get(&key) {
                 value.clone()
               } else {
+                // SAFETY: safe, as we fully await the future this reference is
+                // moved to before moving/dropping the value it points to
                 let key_ref: &'static K = unsafe { std::mem::transmute(&key) };
                 let inner = constructor(key_ref).await;
                 let key = Arc::new(key);
