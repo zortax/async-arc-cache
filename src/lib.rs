@@ -78,12 +78,12 @@ pub struct ArcCache<K: Eq + Hash + 'static, V> {
 }
 
 impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
-  pub fn with_constructor<F, Fut>(
+  pub fn with_fallible_constructor<F, Fut>(
     constructor: F,
   ) -> (Self, impl Future<Output = ()>)
   where
     F: Fn(&'static K) -> Fut,
-    Fut: Future<Output = V>,
+    Fut: Future<Output = Option<V>>,
   {
     let (sender, mut receiver) = unbounded_channel::<CacheCommand<K, V>>();
     let fut = {
@@ -100,7 +100,12 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
                 // SAFETY: safe, as we fully await the future this reference is
                 // moved to before moving/dropping the value it points to
                 let key_ref: &'static K = unsafe { std::mem::transmute(&key) };
-                let inner = constructor(key_ref).await;
+                let inner = match constructor(key_ref).await {
+                  Some(inner) => inner,
+                  None => {
+                    break;
+                  }
+                };
                 let key = Arc::new(key);
                 let value = CachedArc {
                   key: key.clone(),
@@ -123,7 +128,12 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
                   // value it points to
                   let key_ref: &'static K =
                     unsafe { std::mem::transmute(&key) };
-                  let inner = constructor(key_ref).await;
+                  let inner = match constructor(key_ref).await {
+                    Some(inner) => inner,
+                    None => {
+                      break;
+                    }
+                  };
                   let key = Arc::new(key);
                   let value = CachedArc {
                     key: key.clone(),
@@ -151,6 +161,14 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
       }
     };
     (Self { sender }, fut)
+  }
+
+  pub fn with_constructor<F, Fut>(constructor: F,) -> (Self, impl Future<Output = ()>) where
+    F: Fn(&'static K) -> Fut + Copy + 'static,
+    Fut: Future<Output = V>,{
+    Self::with_fallible_constructor(move |key| async move {
+      Some(constructor(key).await)
+    })
   }
 
   pub fn with_default_constructor() -> (Self, impl Future<Output = ()>)
