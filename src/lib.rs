@@ -103,7 +103,7 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
                 let inner = match constructor(key_ref).await {
                   Some(inner) => inner,
                   None => {
-                    break;
+                    continue;
                   }
                 };
                 let key = Arc::new(key);
@@ -119,35 +119,7 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
               let _ignored = responder.send(result);
             }
             CacheCommand::GetItemIfExists(key, responder) => {
-              let _ignored = responder.send(if data.contains_key(&key) {
-                let result = if let Some(value) = data.get(&key) {
-                  (*value).clone()
-                } else {
-                  // SAFETY: safe, as we fully await the future this reference
-                  // is moved to before moving/dropping the
-                  // value it points to
-                  let key_ref: &'static K =
-                    unsafe { std::mem::transmute(&key) };
-                  let inner = match constructor(key_ref).await {
-                    Some(inner) => inner,
-                    None => {
-                      break;
-                    }
-                  };
-                  let key = Arc::new(key);
-                  let value = CachedArc {
-                    key: key.clone(),
-                    inner: Arc::new(inner),
-                    rc: Arc::new(AtomicUsize::new(1)),
-                    sender: sender.clone(),
-                  };
-                  let _ignored = data.insert(key, value.clone());
-                  value
-                };
-                Some(result)
-              } else {
-                None
-              });
+              let _ignored = responder.send(data.get(&key).cloned());
             }
             CacheCommand::DeleteItem(key) => {
               let _ignored = data.remove(key.deref());
@@ -163,9 +135,13 @@ impl<K: Eq + Hash + 'static, V> ArcCache<K, V> {
     (Self { sender }, fut)
   }
 
-  pub fn with_constructor<F, Fut>(constructor: F,) -> (Self, impl Future<Output = ()>) where
+  pub fn with_constructor<F, Fut>(
+    constructor: F,
+  ) -> (Self, impl Future<Output = ()>)
+  where
     F: Fn(&'static K) -> Fut + Copy + 'static,
-    Fut: Future<Output = V>,{
+    Fut: Future<Output = V>,
+  {
     Self::with_fallible_constructor(move |key| async move {
       Some(constructor(key).await)
     })
